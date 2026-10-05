@@ -1,0 +1,524 @@
+# Homework 5 — Q4: Re-evaluating Growth in the Time of Debt
+Jiayue Zou
+
+## Domain problem formulation
+
+The goal is to prepare the public-debt and real GDP growth data needed
+to reproduce and re-evaluate the reported relationship between high
+public debt and economic growth. The unit of analysis is a country-year.
+The two main variables are public debt as a percentage of GDP and annual
+real GDP growth as a percentage.
+
+## Data source overview
+
+- `debt.xls` contains IMF public debt as a percentage of GDP. Countries
+  are stored in rows and years (1800–2015) in columns.
+- `growth.csv` contains the World Bank indicator **GDP growth (annual
+  %)** (`NY.GDP.MKTP.KD.ZG`). Countries are stored in rows and years in
+  columns.
+
+The `growth.csv` file is the exact 2022-09-16 snapshot supplied in the
+official R code and data archive linked by the supplementary repository.
+The cleaning function restricts it to the assignment period, 1960–2021.
+
+## Setup
+
+``` r
+library(tidyverse)
+library(readxl)
+```
+
+## Step 1: Review background information
+
+The debt data were published by the International Monetary Fund, and the
+growth data were published by the World Bank. The intended observations
+are country-year combinations. Values that are unusual should not
+automatically be deleted: recessions can produce negative growth, and
+public debt can exceed 100% of GDP. The important issues are therefore
+structure, missingness, metadata rows, country-name differences, and
+non-country aggregates.
+
+### Data dictionary
+
+| Clean variable   | Meaning                                         | Unit      |
+|------------------|-------------------------------------------------|-----------|
+| `country`        | Country or economy name                         | Character |
+| `year`           | Calendar year                                   | Integer   |
+| `debt_pct_gdp`   | General government gross debt as a share of GDP | Percent   |
+| `growth_pct_gdp` | Annual real GDP growth                          | Percent   |
+
+## Step 2: Load the data
+
+``` r
+debt_raw <- read_excel(
+  "debt.xls",
+  na = c("no data", "...", "n/a", "")
+)
+
+growth_raw <- read_csv(
+  "growth.csv",
+  skip = 4,
+  na = c("", ".."),
+  show_col_types = FALSE
+)
+```
+
+``` r
+raw_overview <- tibble(
+  dataset = c("debt.xls", "growth.csv"),
+  rows = c(nrow(debt_raw), nrow(growth_raw)),
+  columns = c(ncol(debt_raw), ncol(growth_raw)),
+  first_year_column = c(
+    min(as.integer(names(debt_raw)[str_detect(names(debt_raw), "^[0-9]{4}$")])),
+    min(as.integer(names(growth_raw)[str_detect(names(growth_raw), "^[0-9]{4}$")]))
+  ),
+  last_year_column = c(
+    max(as.integer(names(debt_raw)[str_detect(names(debt_raw), "^[0-9]{4}$")])),
+    max(as.integer(names(growth_raw)[str_detect(names(growth_raw), "^[0-9]{4}$")]))
+  )
+)
+
+knitr::kable(raw_overview)
+```
+
+| dataset    | rows | columns | first_year_column | last_year_column |
+|:-----------|-----:|--------:|------------------:|-----------------:|
+| debt.xls   |  197 |     217 |              1800 |             2015 |
+| growth.csv |  266 |      67 |              1960 |             2021 |
+
+## Step 3: Examine the data and create action items
+
+### Finding invalid or special values
+
+The IMF spreadsheet uses text such as `no data`, `...`, and `n/a` for
+missing observations. These strings were declared as `NA` during import.
+Negative GDP growth is possible and should remain in the data. High debt
+values are also possible, so they should be investigated rather than
+automatically discarded.
+
+``` r
+debt_preview <- debt_raw |>
+  select(1, matches("^(1960|1961|1962|1963|1964)$")) |>
+  slice_head(n = 8)
+
+growth_preview <- growth_raw |>
+  select(`Country Name`, `Country Code`, matches("^(1960|1961|1962|1963|1964)$")) |>
+  slice_head(n = 8)
+
+debt_preview
+```
+
+    # A tibble: 8 × 6
+      `DEBT (% of GDP)`   `1960` `1961` `1962` `1963` `1964`
+      <chr>                <dbl>  <dbl>  <dbl>  <dbl>  <dbl>
+    1 <NA>                  NA     NA     NA       NA     NA
+    2 Afghanistan           NA     NA     NA       NA     NA
+    3 Albania               NA     NA     NA       NA     NA
+    4 Algeria               NA     NA     NA       NA     NA
+    5 Angola                NA     NA     NA       NA     NA
+    6 Anguilla              NA     NA     NA       NA     NA
+    7 Antigua and Barbuda   NA     NA     NA       NA     NA
+    8 Argentina             16.8   15.5   15.9     NA     NA
+
+``` r
+growth_preview
+```
+
+    # A tibble: 8 × 7
+      `Country Name`              `Country Code` `1960` `1961` `1962` `1963` `1964`
+      <chr>                       <chr>          <lgl>   <dbl>  <dbl>  <dbl>  <dbl>
+    1 Aruba                       ABW            NA     NA      NA     NA     NA   
+    2 Africa Eastern and Southern AFE            NA      0.240   7.98   5.16   4.58
+    3 Afghanistan                 AFG            NA     NA      NA     NA     NA   
+    4 Africa Western and Central  AFW            NA      1.85    3.77   7.27   5.40
+    5 Angola                      AGO            NA     NA      NA     NA     NA   
+    6 Albania                     ALB            NA     NA      NA     NA     NA   
+    7 Andorra                     AND            NA     NA      NA     NA     NA   
+    8 Arab World                  ARB            NA     NA      NA     NA     NA   
+
+**Action item:** Convert the special missing-value strings to `NA`,
+retain plausible negative growth and high-debt values, and convert the
+measurement columns to numeric.
+
+### Assessing column names
+
+The debt country column is named `DEBT (% of GDP)`, while the growth
+file contains four metadata columns followed by one column per year.
+Neither file is tidy because years are stored as column names.
+
+**Action item:** Rename the identifier and value variables to `country`,
+`year`, `debt_pct_gdp`, and `growth_pct_gdp`; pivot the year columns
+from wide to long format.
+
+### Assessing variable types
+
+``` r
+tibble(
+  debt_column = names(debt_raw)[1:6],
+  debt_type = map_chr(debt_raw[1:6], ~class(.x)[1])
+) |>
+  knitr::kable()
+```
+
+| debt_column     | debt_type |
+|:----------------|:----------|
+| DEBT (% of GDP) | character |
+| 1800            | numeric   |
+| 1801            | numeric   |
+| 1802            | numeric   |
+| 1803            | numeric   |
+| 1804            | numeric   |
+
+``` r
+tibble(
+  growth_column = names(growth_raw)[1:6],
+  growth_type = map_chr(growth_raw[1:6], ~class(.x)[1])
+) |>
+  knitr::kable()
+```
+
+| growth_column  | growth_type |
+|:---------------|:------------|
+| Country Name   | character   |
+| Country Code   | character   |
+| Indicator Name | character   |
+| Indicator Code | character   |
+| 1960           | logical     |
+| 1961           | numeric     |
+
+**Action item:** Store `country` as character, `year` as integer, and
+both measurements as numeric.
+
+### Assessing data completeness
+
+Before cleaning, I examine missing measurements by year for the
+assignment period.
+
+``` r
+debt_missing_by_year <- debt_raw |>
+  rename(country = 1) |>
+  filter(!is.na(country)) |>
+  pivot_longer(
+    cols = matches("^[0-9]{4}$"),
+    names_to = "year",
+    values_to = "debt_pct_gdp"
+  ) |>
+  mutate(year = as.integer(year)) |>
+  filter(year >= 1960) |>
+  group_by(year) |>
+  summarise(rows = n(), missing = sum(is.na(debt_pct_gdp)), .groups = "drop")
+
+growth_missing_by_year <- growth_raw |>
+  select(`Country Name`, matches("^[0-9]{4}$")) |>
+  pivot_longer(
+    cols = matches("^[0-9]{4}$"),
+    names_to = "year",
+    values_to = "growth_pct_gdp"
+  ) |>
+  mutate(year = as.integer(year)) |>
+  filter(year <= 2021) |>
+  group_by(year) |>
+  summarise(rows = n(), missing = sum(is.na(growth_pct_gdp)), .groups = "drop")
+
+debt_missing_by_year |> slice(c(1:3, (n() - 2):n())) |> knitr::kable()
+```
+
+| year | rows | missing |
+|-----:|-----:|--------:|
+| 1960 |  195 |     149 |
+| 1961 |  195 |     148 |
+| 1962 |  195 |     150 |
+| 2013 |  195 |       4 |
+| 2014 |  195 |       4 |
+| 2015 |  195 |       4 |
+
+``` r
+growth_missing_by_year |> slice(c(1:3, (n() - 2):n())) |> knitr::kable()
+```
+
+| year | rows | missing |
+|-----:|-----:|--------:|
+| 1960 |  266 |     266 |
+| 1961 |  266 |     144 |
+| 1962 |  266 |     139 |
+| 2019 |  266 |      14 |
+| 2020 |  266 |      17 |
+| 2021 |  266 |      38 |
+
+Missing values are present in both sources, but a missing measurement is
+not the same as an invalid observation. I retain the country-year row
+and leave its measurement as `NA`.
+
+**Action item:** Preserve missing measurements as `NA`, remove
+blank/metadata rows and non-country aggregates, and verify that each
+cleaned dataset has unique country-year identifiers.
+
+## Step 4: Clean and pre-process the data
+
+### Debt-cleaning function
+
+The IMF file includes five aggregate rows and a copyright row after the
+country rows. It also uses several country names that differ from the
+World Bank. The mapping below is written explicitly in code rather than
+changing the source spreadsheet.
+
+``` r
+clean_debt <- function(data) {
+  names(data)[1] <- "country"
+
+  non_country_rows <- c(
+    "Eastern Caribbean Currency Union",
+    "Euro area",
+    "G-20 Advanced",
+    "G-20 Emerging",
+    "Low Income",
+    "©IMF, 2019"
+  )
+
+  country_name_fixes <- c(
+    "China, People's Republic of" = "China",
+    "Congo, Dem. Rep. of the" = "Congo, Dem. Rep.",
+    "Congo, Republic of" = "Congo, Rep.",
+    "Czech Republic" = "Czechia",
+    "Côte d'Ivoire" = "Cote d'Ivoire",
+    "Egypt" = "Egypt, Arab Rep.",
+    "Hong Kong SAR" = "Hong Kong SAR, China",
+    "Iran" = "Iran, Islamic Rep.",
+    "Korea, Republic of" = "Korea, Rep.",
+    "Lao P.D.R." = "Lao PDR",
+    "Micronesia, Fed. States of" = "Micronesia, Fed. Sts.",
+    "Saint Kitts and Nevis" = "St. Kitts and Nevis",
+    "Saint Lucia" = "St. Lucia",
+    "Saint Vincent and the Grenadines" = "St. Vincent and the Grenadines",
+    "South Sudan, Republic of" = "South Sudan",
+    "Syria" = "Syrian Arab Republic",
+    "São Tomé and Príncipe" = "Sao Tome and Principe",
+    "Turkey" = "Turkiye",
+    "Venezuela" = "Venezuela, RB",
+    "Yemen" = "Yemen, Rep."
+  )
+
+  data |>
+    filter(!is.na(country), !country %in% non_country_rows) |>
+    mutate(country = recode(country, !!!country_name_fixes)) |>
+    pivot_longer(
+      cols = matches("^[0-9]{4}$"),
+      names_to = "year",
+      values_to = "debt_pct_gdp"
+    ) |>
+    mutate(
+      year = as.integer(year),
+      debt_pct_gdp = as.numeric(debt_pct_gdp)
+    ) |>
+    filter(year >= 1960, year <= 2015) |>
+    arrange(country, year)
+}
+
+debt_clean <- clean_debt(debt_raw)
+```
+
+The cleaned Australia rows match the left-hand reference table in the
+assignment.
+
+``` r
+debt_clean |>
+  filter(country == "Australia", between(year, 1960, 1969)) |>
+  knitr::kable(digits = 2)
+```
+
+| country   | year | debt_pct_gdp |
+|:----------|-----:|-------------:|
+| Australia | 1960 |        31.47 |
+| Australia | 1961 |        30.31 |
+| Australia | 1962 |        30.42 |
+| Australia | 1963 |        29.32 |
+| Australia | 1964 |        27.65 |
+| Australia | 1965 |           NA |
+| Australia | 1966 |        41.23 |
+| Australia | 1967 |        39.25 |
+| Australia | 1968 |        38.21 |
+| Australia | 1969 |        35.73 |
+
+### Growth-cleaning function
+
+World Bank downloads contain regional and income-group aggregates in
+addition to countries. Their codes are explicitly removed below. Only
+year columns from 1960 through 2021 are retained.
+
+``` r
+clean_growth <- function(data) {
+  non_country_codes <- c(
+    "AFE", "AFW", "ARB", "CSS", "CEB", "EAR", "EAS", "EAP", "TEA",
+    "EMU", "ECS", "ECA", "TEC", "EUU", "FCS", "HPC", "HIC", "IBD",
+    "IBT", "IDB", "IDX", "IDA", "LTE", "LCN", "LAC", "TLA", "LDC",
+    "LMY", "LIC", "LMC", "MEA", "MNA", "TMN", "MIC", "NAC", "OED",
+    "OSS", "PSS", "PST", "PRE", "SST", "SAS", "TSA", "SSF", "SSA",
+    "TSS", "UMC", "WLD"
+  )
+
+  data |>
+    transmute(
+      country = `Country Name`,
+      country_code = `Country Code`,
+      across(matches("^[0-9]{4}$"))
+    ) |>
+    filter(!country_code %in% non_country_codes) |>
+    pivot_longer(
+      cols = matches("^[0-9]{4}$"),
+      names_to = "year",
+      values_to = "growth_pct_gdp"
+    ) |>
+    mutate(
+      year = as.integer(year),
+      growth_pct_gdp = as.numeric(growth_pct_gdp)
+    ) |>
+    filter(year >= 1960, year <= 2021) |>
+    select(country, year, growth_pct_gdp) |>
+    arrange(country, year)
+}
+
+growth_clean <- clean_growth(growth_raw)
+```
+
+The cleaned Australia rows match the right-hand reference table in the
+assignment.
+
+``` r
+growth_clean |>
+  filter(country == "Australia", between(year, 1960, 1969)) |>
+  knitr::kable(digits = 6)
+```
+
+| country   | year | growth_pct_gdp |
+|:----------|-----:|---------------:|
+| Australia | 1960 |             NA |
+| Australia | 1961 |       2.483271 |
+| Australia | 1962 |       1.294468 |
+| Australia | 1963 |       6.214949 |
+| Australia | 1964 |       6.978540 |
+| Australia | 1965 |       5.980893 |
+| Australia | 1966 |       2.381966 |
+| Australia | 1967 |       6.303650 |
+| Australia | 1968 |       5.095103 |
+| Australia | 1969 |       7.043526 |
+
+### Validation of the two clean datasets
+
+``` r
+debt_duplicates <- debt_clean |>
+  count(country, year) |>
+  filter(n > 1)
+
+growth_duplicates <- growth_clean |>
+  count(country, year) |>
+  filter(n > 1)
+
+stopifnot(
+  nrow(debt_duplicates) == 0,
+  nrow(growth_duplicates) == 0,
+  is.integer(debt_clean$year),
+  is.numeric(debt_clean$debt_pct_gdp),
+  is.integer(growth_clean$year),
+  is.numeric(growth_clean$growth_pct_gdp)
+)
+
+tibble(
+  dataset = c("Clean debt", "Clean growth"),
+  rows = c(nrow(debt_clean), nrow(growth_clean)),
+  countries = c(n_distinct(debt_clean$country), n_distinct(growth_clean$country)),
+  first_year = c(min(debt_clean$year), min(growth_clean$year)),
+  last_year = c(max(debt_clean$year), max(growth_clean$year)),
+  missing_measurements = c(
+    sum(is.na(debt_clean$debt_pct_gdp)),
+    sum(is.na(growth_clean$growth_pct_gdp))
+  )
+) |>
+  knitr::kable()
+```
+
+| dataset      |  rows | countries | first_year | last_year | missing_measurements |
+|:-------------|------:|----------:|-----------:|----------:|---------------------:|
+| Clean debt   | 10584 |       189 |       1960 |      2015 |                 3354 |
+| Clean growth | 13516 |       218 |       1960 |      2021 |                 3707 |
+
+### Pre-processing and joining
+
+The country-name fixes are applied inside `clean_debt()`. `Anguilla` and
+`Taiwan Province of China` remain unmatched because the World Bank
+source does not contain corresponding observations under those names.
+They are real economies, so they are retained rather than incorrectly
+classified as aggregates. A full join preserves valid observations from
+either source; later analyses can filter to rows where both measurements
+are available.
+
+``` r
+prepare_growth_debt <- function(debt_data, growth_data) {
+  full_join(
+    debt_data,
+    growth_data,
+    by = c("country", "year")
+  ) |>
+    arrange(country, year)
+}
+
+growth_debt <- prepare_growth_debt(debt_clean, growth_clean)
+```
+
+``` r
+unmatched_debt_countries <- debt_clean |>
+  distinct(country) |>
+  anti_join(growth_clean |> distinct(country), by = "country")
+
+unmatched_debt_countries |>
+  knitr::kable()
+```
+
+| country                  |
+|:-------------------------|
+| Anguilla                 |
+| Taiwan Province of China |
+
+The combined Australia rows for 1960–1969 match the final reference
+table in the assignment.
+
+``` r
+australia_1960s <- growth_debt |>
+  filter(country == "Australia", between(year, 1960, 1969)) |>
+  select(country, year, debt_pct_gdp, growth_pct_gdp)
+
+knitr::kable(australia_1960s, digits = c(0, 0, 2, 6))
+```
+
+| country   | year | debt_pct_gdp | growth_pct_gdp |
+|:----------|-----:|-------------:|---------------:|
+| Australia | 1960 |        31.47 |             NA |
+| Australia | 1961 |        30.31 |       2.483271 |
+| Australia | 1962 |        30.42 |       1.294468 |
+| Australia | 1963 |        29.32 |       6.214949 |
+| Australia | 1964 |        27.65 |       6.978540 |
+| Australia | 1965 |           NA |       5.980893 |
+| Australia | 1966 |        41.23 |       2.381966 |
+| Australia | 1967 |        39.25 |       6.303650 |
+| Australia | 1968 |        38.21 |       5.095103 |
+| Australia | 1969 |        35.73 |       7.043526 |
+
+``` r
+stopifnot(
+  nrow(australia_1960s) == 10,
+  identical(australia_1960s$year, 1960:1969),
+  isTRUE(all.equal(australia_1960s$debt_pct_gdp[1], 31.47)),
+  isTRUE(all.equal(australia_1960s$growth_pct_gdp[2], 2.483271, tolerance = 1e-6))
+)
+```
+
+## Cleaning decisions summary
+
+1.  I preserved the original source files and performed every change in
+    R.
+2.  I converted documented missing-value codes to `NA` rather than zero.
+3.  I reshaped both sources to one row per country-year.
+4.  I limited debt to 1960–2015 and growth to 1960–2021.
+5.  I removed explicitly listed aggregate entities.
+6.  I standardized differing country names with a hard-coded mapping.
+7.  I retained valid missing measurements and used a full join so
+    cleaning does not silently discard observations.
